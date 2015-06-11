@@ -17,11 +17,11 @@ COMPILER_TYPE=
 # if you want to override this then just run make with
 # make COMPILER_TYPE=<your type>
 # where <your time> is gnu or intel
-ifeq "$(shell which gfortran >/dev/null; echo $$?)" "0"
+ifeq "$(shell which gfortran 2>/dev/null; echo $$?)" "0"
 COMPILER_TYPE=gnu
 endif
 
-ifeq "$(shell which ifort >/dev/null; echo $$?)" "0"
+ifeq "$(shell which ifort 2>/dev/null; echo $$?)" "0"
 COMPILER_TYPE=intel
 endif
 
@@ -112,6 +112,9 @@ CCFLAGS += $(IPO) -O3 -no-prec-div $(HOST) -w -vec-report0 -opt-report0
 ifdef IPO
 # Archive tool for compiling with ipo.
 AR = xiar r
+# For ifort:
+#LINKLIB = ld -shared
+
 endif
 endif
 
@@ -126,7 +129,7 @@ ifeq ($(COMPILER_TYPE),gnu)
 # --------------
 # free-line-length-none : turn of line length limitation (why is this not a default??)
 # cpp  					: perform preprocessing
-FCFLAGS += -ffree-line-length-none -cpp 
+FCFLAGS += -ffree-line-length-none -cpp -fPIC
 
 ifdef DEBUG
 # Debugging mode
@@ -150,6 +153,10 @@ else
 FCFLAGS += -Ofast
 CCFLAGS += -Ofast
 endif
+
+#LINKLIB = gfortran -ggdb -dynamiclib -fPIC -undefined suppress -flat_namespace
+LINKLIB = gfortran -shared -fPIC
+
 endif
 
 # Where polychord is stored
@@ -178,7 +185,7 @@ PROGRAM_LIKELIHOODS = $(patsubst %,lib%.a,$(PROGRAMS))
 
 
 # Export all of the necessary variables
-export DEBUG COMPILER_TYPE FCFLAGS MPI AR FC CC CCFLAGS EXAMPLE_LIKELIHOODS IPO EXT_LIBS
+export DEBUG COMPILER_TYPE FCFLAGS MPI AR FC CC CCFLAGS EXAMPLE_LIKELIHOODS IPO EXT_LIBS LINKLIB
 
 
 # "make" builds all
@@ -187,11 +194,13 @@ all: $(EXAMPLES) $(PROGRAMS)
 
 # Rule for building polychord library
 libchord.a:
-	cd $(POLYCHORD_DIR) && make libchord.a
+	$(MAKE) -C $(POLYCHORD_DIR) libchord.a
+libchord.so:
+	$(MAKE) -C $(POLYCHORD_DIR) libchord.so
 
 # Rule for building likelihood libraries
 $(EXAMPLE_LIKELIHOODS) $(PROGRAM_LIKELIHOODS): libchord.a
-	cd $(LIKELIHOOD_DIR) && make $@
+	$(MAKE) -C $(LIKELIHOOD_DIR) $@
 
 # Rule for example programs
 $(EXAMPLES) $(PROGRAMS): %: libchord.a lib%.a  polychord.o
@@ -205,11 +214,11 @@ polychord.o: polychord.F90
 
 clean:
 	rm -f *.o *.mod *.MOD
-	cd $(LIKELIHOOD_DIR) && make clean 
-	cd $(POLYCHORD_DIR) && make clean
+	$(MAKE) -C $(LIKELIHOOD_DIR) clean 
+	$(MAKE) -C $(POLYCHORD_DIR) clean
 	
 veryclean: clean
 	rm -f *~ 
-	cd $(POLYCHORD_DIR) && make veryclean
-	cd $(LIKELIHOOD_DIR) && make veryclean
+	$(MAKE) -C $(POLYCHORD_DIR) veryclean
+	$(MAKE) -C $(LIKELIHOOD_DIR) veryclean
 	cd $(BIN_DIR) && rm -f $(EXAMPLES) $(PROGRAMS)
