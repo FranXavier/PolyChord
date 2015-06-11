@@ -12,7 +12,8 @@ program PolyChord
     use abort_module,             only: halt_program
     use loglikelihood_module,     only: loglikelihood, setup_loglikelihood
 #ifdef MPI
-    use mpi_module
+    use mpi_module,               only: initialise_mpi, finalise_mpi
+    use mpi,                      only: MPI_COMM_WORLD
 #endif
 
     ! ~~~~~~~ Local Variable Declaration ~~~~~~~
@@ -118,7 +119,7 @@ program PolyChord
         settings%update_resume = settings%nlive
         settings%update_posterior = -1
 
-        settings%thin_posterior= 1d0
+        settings%boost_posterior= 5d0
         allocate(settings%grade_frac(1)) 
         settings%grade_frac=[1d0]
 

@@ -57,11 +57,11 @@ module generate_module
 
 
     !> Generate an initial set of live points distributed uniformly in the unit hypercube in parallel
-    subroutine GenerateLivePoints(loglikelihood,priors,settings,RTI,mpi_communicator,nprocs,myrank,root)
+    subroutine GenerateLivePoints(loglikelihood,priors,settings,RTI,mpi_info)
         use priors_module,    only: prior
         use settings_module,  only: program_settings
         use random_module,   only: random_reals
-        use utils_module,    only: logzero,write_phys_unit,DB_FMT,fmt_len,minpos
+        use utils_module,    only: logzero,write_phys_unit,DB_FMT,fmt_len,minpos,time
         use calculate_module, only: calculate_point
         use read_write_module, only: phys_live_file
         use feedback_module,  only: write_started_generating,write_finished_generating,write_generating_live_points
@@ -69,7 +69,9 @@ module generate_module
         use array_module,     only: add_point
         use abort_module
 #ifdef MPI
-        use mpi_module, only: throw_point,catch_point,more_points_needed,sum_integers,sum_doubles,request_point,no_more_points
+        use mpi_module, only: mpi_type,is_root,linear_mode,throw_point,catch_point,more_points_needed,sum_integers,sum_doubles,request_point,no_more_points
+#else
+        use mpi_module, only: mpi_type,is_root,linear_mode
 #endif
 
         implicit none
@@ -91,10 +93,7 @@ module generate_module
         ! The run time info (very important, see src/run_time_info.f90)
         type(run_time_info) :: RTI
 
-        integer, intent(in) :: mpi_communicator !> MPI handle
-        integer, intent(in) :: nprocs           !> The number of processes
-        integer, intent(in) :: myrank           !> The rank of the processor
-        integer, intent(in) :: root             !> The root process
+        type(mpi_type),intent(in) :: mpi_info
 #ifdef MPI
         integer             :: active_slaves    !  Number of currently working slaves
         integer             :: slave_id         !  Slave identifier to signal who to throw back to
@@ -110,15 +109,12 @@ module generate_module
         double precision :: time0,time1,total_time
         double precision,dimension(size(settings%grade_dims)) :: speed
 
-#ifndef MPI
-        nlike=mpi_communicator ! Stop an annoying unused variable warning -- this does nothing
-#endif
 
         ! Initialise number of likelihood calls to zero here
         nlike = 0
 
 
-        if(myrank==root) then
+        if(is_root(mpi_info)) then
             ! ---------------------------------------------- !
             call write_started_generating(settings%feedback)
             ! ---------------------------------------------- !
@@ -135,20 +131,23 @@ module generate_module
         end if
 
 
-        if(nprocs==1) then
+        total_time=0
+        if(linear_mode(mpi_info)) then
             !===================== LINEAR MODE =========================
 
-            call cpu_time(time0)
             do while(RTI%nlive(1)<settings%nlive)
 
                 ! Generate a random coordinate
                 live_point(settings%h0:settings%h1) = random_reals(settings%nDims)
 
                 ! Compute physical coordinates, likelihoods and derived parameters
+                time0 = time()
                 call calculate_point( loglikelihood, priors, live_point, settings, nlike)
+                time1 = time()
 
                 ! If its valid, and we need more points, add it to the array
                 if(live_point(settings%l0)>logzero) then
+                    total_time =total_time+ time1-time0
 
                     call add_point(live_point,RTI%live,RTI%nlive,1) ! Add this point to the array
 
@@ -165,24 +164,22 @@ module generate_module
                 end if
 
             end do
-            call cpu_time(time1)
-            total_time = time1-time0
 
 
-        else if(nprocs>1) then
 #ifdef MPI
+        else 
             !===================== PARALLEL MODE =======================
 
-            if(myrank==root) then
+            if(is_root(mpi_info)) then
                 ! The root node just recieves data from all other processors
 
 
-                active_slaves=nprocs-1 ! Set the number of active processors to the number of slaves
+                active_slaves=mpi_info%nprocs-1 ! Set the number of active processors to the number of slaves
 
                 do while(active_slaves>0) 
 
                     ! Recieve a point from any slave
-                    slave_id = catch_point(live_point,mpi_communicator)
+                    slave_id = catch_point(live_point,mpi_info)
 
                     ! If its valid, and we need more points, add it to the array
                     if(live_point(settings%l0)>logzero .and. RTI%nlive(1)<settings%nlive) then
@@ -203,9 +200,9 @@ module generate_module
 
 
                     if(RTI%nlive(1)<settings%nlive) then
-                        call request_point(mpi_communicator,slave_id)  ! If we still need more points, send a signal to have another go
+                        call request_point(mpi_info,slave_id)  ! If we still need more points, send a signal to have another go
                     else
-                        call no_more_points(mpi_communicator,slave_id) ! Otherwise, send a signal to stop
+                        call no_more_points(mpi_info,slave_id) ! Otherwise, send a signal to stop
                         active_slaves=active_slaves-1                  ! decrease the active slave counter
                     end if
 
@@ -217,46 +214,37 @@ module generate_module
             else
 
                 ! The slaves simply generate and send points until they're told to stop by the master
-                call cpu_time(time0)
                 do while(.true.)
         
                     live_point(settings%h0:settings%h1) = random_reals(settings%nDims)       ! Generate a random hypercube coordinate
+                    time0 = time()
                     call calculate_point( loglikelihood, priors, live_point, settings,nlike) ! Compute physical coordinates, likelihoods and derived parameters
-                    call throw_point(live_point,mpi_communicator,root)                       ! Send it to the root node
-                    if(.not. more_points_needed(mpi_communicator,root)) exit                 ! If we've recieved a kill signal, then exit this loop
+                    time1 = time()
+                    if(live_point(settings%l0)>logzero) total_time = total_time + time1-time0
+                    call throw_point(live_point,mpi_info)                                    ! Send it to the root node
+                    if(.not. more_points_needed(mpi_info)) exit                              ! If we've recieved a kill signal, then exit this loop
 
                 end do
-                call cpu_time(time1)
-                total_time=time1-time0
             end if
-
-
-
-
-#else
-            ! If we don't have MPI configured, we can't generate in parallel
-            call halt_program('generate error: cannot have nprocs>1 without MPI')
 #endif
-        else !(nprocs<0)
-            call halt_program('generate error: nprocs<0')
         end if !(nprocs case)
 
 #ifdef MPI
-        nlike = sum_integers(nlike,mpi_communicator) ! Gather the likelihood calls onto one node
-        total_time = sum_doubles(total_time,mpi_communicator) ! Sum up the total time taken
+        nlike = sum_integers(nlike,mpi_info) ! Gather the likelihood calls onto one node
+        total_time = sum_doubles(total_time,mpi_info) ! Sum up the total time taken
 #endif
 
 
         ! ----------------------------------------------- !
-        if(myrank==root) call write_finished_generating(settings%feedback)  
+        if(is_root(mpi_info)) call write_finished_generating(settings%feedback)  
         ! ----------------------------------------------- !
         ! Find the average time taken
         speed(1) = total_time/settings%nlive
-        call time_speeds(loglikelihood,priors,settings,speed,mpi_communicator,myrank,root) 
+        call time_speeds(loglikelihood,priors,settings,RTI,speed,mpi_info) 
 
 
 
-        if(myrank==root) then
+        if(is_root(mpi_info)) then
 
             ! Pass over the number of likelihood calls
             RTI%nlike(1) = nlike
@@ -271,6 +259,14 @@ module generate_module
             if(.not. allocated(RTI%num_repeats) ) allocate(RTI%num_repeats(size(settings%grade_dims)))
             RTI%num_repeats(1) = settings%num_repeats
             RTI%num_repeats(2:) = nint(settings%grade_frac(2:)/(settings%grade_frac(1)+0d0)*RTI%num_repeats(1)*speed(1)/speed(2:))
+
+            ! Set the posterior thinning factor
+            if(settings%boost_posterior<0d0) then
+                RTI%thin_posterior = 1d0
+            else
+                RTI%thin_posterior = (settings%boost_posterior+0d0)/(sum(RTI%num_repeats)+0d0)
+            end if
+
         end if
 
 
@@ -281,15 +277,18 @@ module generate_module
 
 
 
-    subroutine time_speeds(loglikelihood,priors,settings,speed,mpi_communicator,myrank,root)
+    subroutine time_speeds(loglikelihood,priors,settings,RTI,speed,mpi_info)
         use priors_module,    only: prior
         use settings_module,  only: program_settings
+        use run_time_module,   only: run_time_info
         use random_module,   only: random_reals
-        use utils_module,    only: logzero,normal_fb,stdout_unit,fancy_fb
+        use utils_module,    only: logzero,normal_fb,stdout_unit,fancy_fb,time
         use calculate_module, only: calculate_point
         use abort_module
 #ifdef MPI
-        use mpi_module, only: sum_doubles,sum_integers
+        use mpi_module, only: mpi_type,is_root,sum_doubles,sum_integers
+#else
+        use mpi_module, only: mpi_type,is_root
 #endif
 
         implicit none
@@ -307,12 +306,13 @@ module generate_module
 
         !> Program settings
         type(program_settings), intent(in) :: settings
+       
+        ! The run time info (very important, see src/run_time_info.f90)
+        type(run_time_info) :: RTI
 
         double precision,dimension(size(settings%grade_dims)) :: speed
 
-        integer, intent(in) :: mpi_communicator !> MPI handle
-        integer, intent(in) :: myrank           !> The rank of the processor
-        integer, intent(in) :: root             !> The root process
+        type(mpi_type), intent(in) :: mpi_info
 
         integer :: i_speed
         integer :: i_live
@@ -323,9 +323,6 @@ module generate_module
 
         double precision, dimension(settings%nTotal) :: live_point ! Temporary live point array
 
-#ifndef MPI
-        nlike=mpi_communicator
-#endif
         nlike=0
 
         ! Calculate a slow likelihood
@@ -335,7 +332,7 @@ module generate_module
             if (live_point(settings%l0)> logzero) exit
         end do
 
-        if(settings%feedback>=fancy_fb.and.myrank==root) write(stdout_unit,'(A1,"Speed ",I2," = ",E10.3, " seconds")') char(13), 1, speed(1)
+        if(settings%feedback>=normal_fb.and.is_root(mpi_info)) write(stdout_unit,'(A1,"Speed ",I2," = ",E10.3, " seconds")') char(13), 1, speed(1)
         do i_speed=2,size(speed)
 
             h0 = settings%h0+sum(settings%grade_dims(:i_speed-1))
@@ -344,31 +341,34 @@ module generate_module
             i_live=0
             total_time=0
             
-            if(settings%feedback<=normal_fb.and.myrank==root) then
+            if(settings%feedback>=fancy_fb.and.is_root(mpi_info)) then
                 write(stdout_unit,'(A1,"Speed ",I2, " = ? (calculating)")',advance='no') char(13), i_speed
                 flush(stdout_unit)
             end if
 
-            call cpu_time(time0)
-            time1=time0
-            do while( (time1-time0)/settings%grade_frac(i_speed)< speed(1)/settings%grade_frac(1) )
+            do while( total_time/settings%grade_frac(i_speed)< speed(1)/settings%grade_frac(1) *settings%nlive / dble(mpi_info%nprocs ))
                 live_point(h0:h1) = random_reals(h1-h0+1)
 
+                time0 = time()
                 call calculate_point( loglikelihood, priors, live_point, settings, nlike)
+                time1 = time()
 
-                if(live_point(settings%l0)>logzero) i_live=i_live+1
+                if(live_point(settings%l0)>logzero) then
+                    total_time=total_time+time1-time0
+                    i_live=i_live+1
+                end if
 
-                call cpu_time(time1)
             end do
-            total_time=time1-time0
 #ifdef MPI
-            total_time=sum_doubles(total_time,mpi_communicator)
-            i_live = sum_integers(i_live,mpi_communicator)
+            total_time=sum_doubles(total_time,mpi_info)
+            i_live = sum_integers(i_live,mpi_info)
+            nlike = sum_integers(nlike,mpi_info)
 #endif
             speed(i_speed) = total_time/i_live
-            if(settings%feedback>=fancy_fb.and.myrank==root) then
+            if(is_root(mpi_info)) RTI%nlike(i_speed) =  RTI%nlike(i_speed) + nlike
+            if(settings%feedback>=fancy_fb.and.is_root(mpi_info)) then
                 write(stdout_unit,'(A1,"Speed ",I2," = ",E10.3, " seconds     ")') char(13), i_speed, speed(i_speed)
-            else if(settings%feedback>=normal_fb.and.myrank==root) then
+            else if(settings%feedback>=normal_fb.and.is_root(mpi_info)) then
                 write(stdout_unit,'("Speed ",I2," = ",E10.3, " seconds     ")') i_speed, speed(i_speed)
             end if
 
