@@ -10,9 +10,11 @@ module chordal_module
 
         implicit none
         interface
-            function loglikelihood(theta,phi)
-                double precision, intent(in),  dimension(:) :: theta
-                double precision, intent(out),  dimension(:) :: phi
+            function loglikelihood(nDims, theta, nDerived, phi)
+		integer,          intent(in)                 :: nDims
+		integer,          intent(in)                 :: nDerived
+		double precision, intent(in), dimension(nDims) ::theta
+		double precision, intent(out),  dimension(nDerived) :: phi
                 double precision :: loglikelihood
             end function
         end interface
@@ -164,9 +166,11 @@ module chordal_module
         use calculate_module, only: calculate_point
         implicit none
         interface
-            function loglikelihood(theta,phi)
-                double precision, intent(in),  dimension(:) :: theta
-                double precision, intent(out),  dimension(:) :: phi
+            function loglikelihood(nDims, theta, nDerived, phi)
+		integer,          intent(in)                 :: nDims
+		integer,          intent(in)                 :: nDerived
+		double precision, intent(in), dimension(nDims) ::theta
+		double precision, intent(out),  dimension(nDerived) :: phi
                 double precision :: loglikelihood
             end function
         end interface

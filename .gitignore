@@ -1,0 +1,9 @@
+*~
+*.pyc
+*.o
+*.so
+*.a
+chains
+*.mod
+src/loglikelihood__genmod.f90
+CExample/eggboxC
